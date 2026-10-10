@@ -1,0 +1,243 @@
+import tkinter as tk
+from tkinter import messagebox
+import csv
+import random
+import pygame  # Usamos pygame que es 100% compatible con Raspberry Pi/Linux
+
+def cargar_preguntas(archivo):
+    try:
+        with open(archivo, mode='r', encoding='utf-8-sig') as file:
+            primera_linea = file.readline()
+            file.seek(0)
+            delimitador = ';' if ';' in primera_linea else ','
+            return list(csv.DictReader(file, delimiter=delimitador))
+    except FileNotFoundError:
+        return []
+
+class ConcursilloUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("El ConcursTIO: Elías vs Andrea")
+        self.root.geometry("750x700")
+        self.root.config(bg="#1e1e1e")
+        
+        # --- MÚSICA CON PYGAME ---
+        pygame.mixer.init()
+        try:
+            pygame.mixer.music.load("Wisteria_Blade.mp3")
+            pygame.mixer.music.play(loops=-1) # -1 es bucle infinito
+        except Exception as e:
+            print("Aviso: No se pudo cargar 'Wisteria_Blade.mp3'.")
+        
+        # --- VARIABLES DEL JUEGO ---
+        self.preguntas = cargar_preguntas('preguntas.csv')
+        self.idx = 0
+        self.puntos_elias = 0
+        self.puntos_andrea = 0
+        self.turno_actual = None
+        self.esperando_pulsador = False
+        
+        self.comodin_50 = True
+        self.comodin_pub = True
+        self.id_timer_publico = None
+        self.perdedor_instantaneo = None
+        
+        if not self.preguntas:
+            messagebox.showerror("Error", "No se encontró el archivo 'preguntas.csv'.")
+            root.destroy()
+            return
+
+        # --- INTERFAZ ---
+        self.frame_marcador = tk.Frame(root, bg="#333333", pady=10)
+        self.frame_marcador.pack(fill="x")
+        
+        self.lbl_marcador = tk.Label(self.frame_marcador, 
+                                     text="🏆 Elías: 0   |   Andrea: 0 🏆", 
+                                     font=("Arial", 16, "bold"), bg="#333333", fg="gold")
+        self.lbl_marcador.pack()
+
+        self.lbl_estado = tk.Label(root, text="", font=("Arial", 22, "bold"), bg="#1e1e1e", fg="#00ffcc")
+        self.lbl_estado.pack(pady=15)
+
+        self.lbl_pregunta = tk.Label(root, text="", wraplength=600, font=("Arial", 16, "bold"), bg="#1e1e1e", fg="white")
+        self.lbl_pregunta.pack(pady=15)
+
+        self.botones = {}
+        for letra in ['A', 'B', 'C', 'D']:
+            btn = tk.Button(root, text="---", font=("Arial", 14), width=50, bg="#555555", state="disabled",
+                            command=lambda l=letra: self.verificar_respuesta(l))
+            btn.pack(pady=5)
+            self.botones[letra] = btn
+
+        frame_comodines = tk.Frame(root, bg="#1e1e1e")
+        self.btn_50 = tk.Button(frame_comodines, text="🌟 Comodín 50%", font=("Arial", 12, "bold"), bg="#9146FF", fg="white", state="disabled", command=self.usar_50)
+        self.btn_50.pack(side="left", padx=10)
+        
+        self.btn_pub = tk.Button(frame_comodines, text="💬 Público", font=("Arial", 12, "bold"), bg="#9146FF", fg="white", state="disabled", command=self.usar_publico)
+        self.btn_pub.pack(side="left", padx=10)
+
+        self.btn_recarga = tk.Button(frame_comodines, text="🔄 Recargar Comodines", font=("Arial", 12, "bold"), bg="#4CAF50", fg="white", command=self.recargar_comodines)
+        self.btn_recarga.pack(side="left", padx=10)
+        
+        frame_comodines.pack(pady=30)
+        
+        # --- CONTROLES DE TECLADO ---
+        self.root.bind('<Control_L>', lambda e: self.capturar_pulsador("Elías"))
+        self.root.bind('<Control_R>', lambda e: self.capturar_pulsador("Andrea"))
+
+        self.iniciar_ronda()
+
+    def iniciar_ronda(self):
+        if self.idx >= len(self.preguntas):
+            self.mostrar_resultados_finales()
+            return
+
+        self.turno_actual = None
+        self.esperando_pulsador = False
+        
+        if self.id_timer_publico is not None:
+            self.root.after_cancel(self.id_timer_publico)
+            self.id_timer_publico = None
+
+        self.lbl_pregunta.config(text=f"Preparando la Pregunta {self.idx + 1}...\n¡Atentos a los pulsadores!")
+        
+        for btn in self.botones.values():
+            btn.config(state="disabled", text="---", bg="#555555")
+        
+        self.btn_50.config(state="disabled")
+        self.btn_pub.config(state="disabled")
+
+        self.cuenta_atras(5)
+
+    def cuenta_atras(self, segundos):
+        if segundos > 0:
+            self.lbl_estado.config(text=str(segundos), fg="#ff4444")
+            self.root.after(1000, self.cuenta_atras, segundos - 1)
+        else:
+            self.lbl_estado.config(text="¡PULSA!", fg="#00ffcc")
+            self.esperando_pulsador = True
+
+    def capturar_pulsador(self, jugador):
+        if self.esperando_pulsador:
+            self.esperando_pulsador = False  
+            self.turno_actual = jugador
+            self.lbl_estado.config(text=f"¡Turno de {jugador.upper()}!", fg="yellow")
+            self.mostrar_pregunta()
+
+    def mostrar_pregunta(self):
+        p = self.preguntas[self.idx]
+        self.lbl_pregunta.config(text=p['Pregunta'])
+        
+        for letra in ['A', 'B', 'C', 'D']:
+            self.botones[letra].config(text=f"{letra}) {p['Opcion_'+letra]}", state="normal", bg="#f0f0f0")
+            
+        if self.comodin_50: self.btn_50.config(state="normal", bg="#9146FF")
+        if self.comodin_pub: self.btn_pub.config(state="normal", bg="#9146FF")
+
+    def verificar_respuesta(self, respuesta):
+        if self.id_timer_publico is not None:
+            self.root.after_cancel(self.id_timer_publico)
+            self.id_timer_publico = None
+
+        correcta = self.preguntas[self.idx]['Correcta'].strip().upper()
+        is_ultima = (self.idx == len(self.preguntas) - 1)
+        
+        if respuesta == correcta:
+            if self.turno_actual == "Elías": self.puntos_elias += 1
+            if self.turno_actual == "Andrea": self.puntos_andrea += 1
+            messagebox.showinfo("¡Correcto!", f"¡Muy bien eres mas Listo que un Cuquin {self.turno_actual}!, sumas 1 punto.")
+        else:
+            texto_correcto = self.preguntas[self.idx][f'Opcion_{correcta}']
+            if is_ultima:
+                self.perdedor_instantaneo = self.turno_actual
+                messagebox.showerror("¡Fallo Fatal!", f"Imperdonable {self.turno_actual}... ¡Era la pregunta mas importante !\n\nPierdes el juego automáticamente.")
+            else:
+                messagebox.showerror("¡Fallaste!", f"Haz Decepcionado a Lola {self.turno_actual}... La correcta era:\n\n{correcta}) {texto_correcto}")
+        
+        self.lbl_marcador.config(text=f"🏆 Elías: {self.puntos_elias}   |   Andrea: {self.puntos_andrea} 🏆")
+        self.idx += 1
+        self.root.after(1000, self.iniciar_ronda)
+
+    def recargar_comodines(self):
+        self.comodin_50 = True
+        self.comodin_pub = True
+        if self.turno_actual is not None:
+            self.btn_50.config(state="normal", bg="#9146FF")
+            self.btn_pub.config(state="normal", bg="#9146FF")
+        messagebox.showinfo("Recarga", "¡Los comodines han sido reactivados!")
+
+    def usar_50(self):
+        if not self.comodin_50: return
+        self.comodin_50 = False
+        self.btn_50.config(state="disabled", bg="#555555")
+        correcta = self.preguntas[self.idx]['Correcta'].strip().upper()
+        incorrectas = [l for l in ['A', 'B', 'C', 'D'] if l != correcta]
+        for letra in random.sample(incorrectas, 2):
+            self.botones[letra].config(text="---", state="disabled", bg="#333333")
+
+    def usar_publico(self):
+        if not self.comodin_pub: return
+        self.comodin_pub = False
+        self.btn_pub.config(state="disabled", bg="#555555")
+        
+        correcta = self.preguntas[self.idx]['Correcta'].strip().upper()
+        opciones_vivas = [l for l, btn in self.botones.items() if btn['state'] == 'normal']
+        
+        porc_correcta = random.randint(40, 75) if len(opciones_vivas) == 4 else random.randint(55, 85)
+        resultados = {correcta: porc_correcta}
+        resto = 100 - porc_correcta
+        
+        incorrectas_vivas = [l for l in opciones_vivas if l != correcta]
+        for i, letra in enumerate(incorrectas_vivas):
+            p = resto if i == len(incorrectas_vivas) - 1 else random.randint(0, resto)
+            resultados[letra] = p
+            resto -= p
+                
+        msg = "El chat ha votado:\n\n"
+        for letra in sorted(opciones_vivas):
+            msg += f"{letra}: [{'█' * (resultados[letra] // 5)}] {resultados[letra]}%\n"
+            
+        messagebox.showinfo("Resultados del Público", msg)
+        self.cuenta_atras_publico(60)
+
+    def cuenta_atras_publico(self, segundos):
+        if segundos > 0:
+            self.lbl_estado.config(text=f"⏳ Tiempo de Chat: {segundos}s", fg="orange")
+            self.id_timer_publico = self.root.after(1000, self.cuenta_atras_publico, segundos - 1)
+        else:
+            self.lbl_estado.config(text="¡TIEMPO AGOTADO!", fg="red")
+            self.id_timer_publico = None
+            self.forzar_fallo_tiempo()
+
+    def forzar_fallo_tiempo(self):
+        correcta = self.preguntas[self.idx]['Correcta'].strip().upper()
+        texto_correcto = self.preguntas[self.idx][f'Opcion_{correcta}']
+        is_ultima = (self.idx == len(self.preguntas) - 1)
+        
+        if is_ultima:
+            self.perdedor_instantaneo = self.turno_actual
+            messagebox.showerror("¡Tiempo Agotado!", f"¡Se acabó el tiempo y era la última pregunta!\n\n{self.turno_actual} PIERDE AUTOMÁTICAMENTE.")
+        else:
+            messagebox.showerror("¡Tiempo Agotado!", f"¡Se acabó el tiempo {self.turno_actual}!\n\nLa correcta era:\n\n{correcta}) {texto_correcto}")
+            
+        self.lbl_marcador.config(text=f"🏆 Elías: {self.puntos_elias}   |   Andrea: {self.puntos_andrea} 🏆")
+        self.idx += 1
+        self.root.after(1000, self.iniciar_ronda)
+
+    def mostrar_resultados_finales(self):
+        pygame.mixer.music.stop() # Apaga la música de forma segura
+        
+        if self.perdedor_instantaneo == "Elías": ganador = "¡HA GANADO ANDREA! 🎉 (Elías falló la última)"
+        elif self.perdedor_instantaneo == "Andrea": ganador = "¡HA GANADO ELÍAS! 🎉 (Andrea falló la última)"
+        else:
+            if self.puntos_elias > self.puntos_andrea: ganador = "¡HA GANADO ELÍAS! 🎉"
+            elif self.puntos_andrea > self.puntos_elias: ganador = "¡HA GANADO ANDREA! 🎉"
+            else: ganador = "¡ES UN EMPATE! 🤝"
+
+        messagebox.showinfo("FIN DEL JUEGO", f"Marcador Final:\nElías: {self.puntos_elias}\nAndrea: {self.puntos_andrea}\n\n{ganador}")
+        self.root.destroy()
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = ConcursilloUI(root)
+    root.mainloop()
